@@ -22,6 +22,7 @@ import {
   Image as ImageIcon,
   Lock,
   Maximize2,
+  Minus,
   Move,
   Pencil,
   Plus,
@@ -98,11 +99,35 @@ type DragState = {
   handle?: ResizeHandle;
 };
 
+type HistoryEntry = {
+  project: PortfolioProject;
+  selectedPageId: string;
+  selectedElementId: string | null;
+};
+
+type ZoomMode = 'fit' | 'manual';
+
 const HISTORY_LIMIT = 45;
 const GRID_SIZE = 10;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 2;
+const ZOOM_STEP = 0.05;
+const CANVAS_FIT_PADDING = 64;
 
 function cloneProject(project: PortfolioProject): PortfolioProject {
   return JSON.parse(JSON.stringify(project)) as PortfolioProject;
+}
+
+function createHistoryEntry(
+  project: PortfolioProject,
+  selectedPageId: string,
+  selectedElementId: string | null,
+): HistoryEntry {
+  return {
+    project: cloneProject(project),
+    selectedPageId,
+    selectedElementId,
+  };
 }
 
 function cloneElement(
@@ -193,6 +218,10 @@ function clamp(value: number, min: number, max: number) {
 
 function snap(value: number, enabled: boolean) {
   return enabled ? Math.round(value / GRID_SIZE) * GRID_SIZE : value;
+}
+
+function normalizeZoom(value: number) {
+  return clamp(Math.round(value * 100) / 100, MIN_ZOOM, MAX_ZOOM);
 }
 
 function isTextEntry(target: EventTarget | null) {
@@ -387,20 +416,25 @@ export function PortfolioBuilder() {
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('Loading');
   const [hydrated, setHydrated] = useState(false);
-  const [past, setPast] = useState<PortfolioProject[]>([]);
-  const [future, setFuture] = useState<PortfolioProject[]>([]);
+  const [past, setPast] = useState<HistoryEntry[]>([]);
+  const [future, setFuture] = useState<HistoryEntry[]>([]);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [draggedPageId, setDraggedPageId] = useState<string | null>(null);
   const [clipboardElement, setClipboardElement] =
     useState<PortfolioElement | null>(null);
   const [zoom, setZoom] = useState(0.78);
+  const [zoomMode, setZoomMode] = useState<ZoomMode>('fit');
   const [showGrid, setShowGrid] = useState(true);
   const [showSafeArea, setShowSafeArea] = useState(true);
   const [snapToGrid, setSnapToGrid] = useState(true);
 
   const imageInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
-  const interactionSnapshotRef = useRef<PortfolioProject | null>(null);
+  const canvasScrollRef = useRef<HTMLDivElement>(null);
+  const pageThumbnailListRef = useRef<HTMLDivElement>(null);
+  const zoomModeRef = useRef<ZoomMode>('fit');
+  const interactionSnapshotRef = useRef<HistoryEntry | null>(null);
+  const interactionChangedRef = useRef(false);
 
   const { selectedPage, selectedElement } = useSelectedProjectParts(
     project,
@@ -414,6 +448,73 @@ export function PortfolioBuilder() {
   );
   const selectedPageElementMaxZ = maxZIndex(selectedPage);
 
+  useEffect(() => {
+    zoomModeRef.current = zoomMode;
+  }, [zoomMode]);
+
+  const calculateFitZoom = useCallback(() => {
+    const canvas = canvasScrollRef.current;
+    if (!canvas) return 0.78;
+
+    const rect = canvas.getBoundingClientRect();
+    const availableWidth = Math.max(1, rect.width - CANVAS_FIT_PADDING);
+    const availableHeight = Math.max(1, rect.height - CANVAS_FIT_PADDING);
+
+    return normalizeZoom(
+      Math.min(
+        availableWidth / BOOK_PAGE_WIDTH,
+        availableHeight / BOOK_PAGE_HEIGHT,
+      ),
+    );
+  }, []);
+
+  const refreshFitZoom = useCallback(() => {
+    const nextZoom = calculateFitZoom();
+    if (zoomModeRef.current === 'fit') setZoom(nextZoom);
+  }, [calculateFitZoom]);
+
+  const fitCanvasToWorkspace = useCallback(() => {
+    setZoomMode('fit');
+    setZoom(calculateFitZoom());
+  }, [calculateFitZoom]);
+
+  const setManualZoom = useCallback((nextZoom: number) => {
+    setZoomMode('manual');
+    setZoom(normalizeZoom(nextZoom));
+  }, []);
+
+  const stepZoom = useCallback((delta: number) => {
+    setZoomMode('manual');
+    setZoom((currentZoom) => normalizeZoom(currentZoom + delta));
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasScrollRef.current;
+    if (!canvas) return;
+
+    const timeout = window.setTimeout(refreshFitZoom, 0);
+    const observer =
+      'ResizeObserver' in window ? new ResizeObserver(refreshFitZoom) : null;
+
+    observer?.observe(canvas);
+    window.addEventListener('resize', refreshFitZoom);
+
+    return () => {
+      window.clearTimeout(timeout);
+      observer?.disconnect();
+      window.removeEventListener('resize', refreshFitZoom);
+    };
+  }, [refreshFitZoom]);
+
+  useEffect(() => {
+    const selectedThumbnail =
+      pageThumbnailListRef.current?.querySelector<HTMLButtonElement>(
+        '[data-selected="true"]',
+      );
+
+    selectedThumbnail?.scrollIntoView({ block: 'nearest' });
+  }, [selectedPageId]);
+
   const commitProject = useCallback(
     (updater: (current: PortfolioProject) => PortfolioProject) => {
       setSaveStatus('Saving');
@@ -421,13 +522,13 @@ export function PortfolioBuilder() {
         const nextProject = stampProject(updater(current));
         setPast((history) => [
           ...history.slice(-(HISTORY_LIMIT - 1)),
-          cloneProject(current),
+          createHistoryEntry(current, selectedPageId, selectedElementId),
         ]);
         setFuture([]);
         return nextProject;
       });
     },
-    [],
+    [selectedElementId, selectedPageId],
   );
 
   const updateProjectSilently = useCallback(
@@ -442,30 +543,37 @@ export function PortfolioBuilder() {
     setPast((history) => {
       if (history.length === 0) return history;
 
+      setSaveStatus('Saving');
       const previous = history[history.length - 1];
       setFuture((redoHistory) =>
-        [cloneProject(project), ...redoHistory].slice(0, HISTORY_LIMIT),
+        [
+          createHistoryEntry(project, selectedPageId, selectedElementId),
+          ...redoHistory,
+        ].slice(0, HISTORY_LIMIT),
       );
-      setProject(previous);
-      setSelectedElementId(null);
+      setProject(previous.project);
+      setSelectedPageId(previous.selectedPageId);
+      setSelectedElementId(previous.selectedElementId);
       return history.slice(0, -1);
     });
-  }, [project]);
+  }, [project, selectedElementId, selectedPageId]);
 
   const redo = useCallback(() => {
     setFuture((redoHistory) => {
       if (redoHistory.length === 0) return redoHistory;
 
-      const nextProject = redoHistory[0];
+      setSaveStatus('Saving');
+      const next = redoHistory[0];
       setPast((history) => [
         ...history.slice(-(HISTORY_LIMIT - 1)),
-        cloneProject(project),
+        createHistoryEntry(project, selectedPageId, selectedElementId),
       ]);
-      setProject(nextProject);
-      setSelectedElementId(null);
+      setProject(next.project);
+      setSelectedPageId(next.selectedPageId);
+      setSelectedElementId(next.selectedElementId);
       return redoHistory.slice(1);
     });
-  }, [project]);
+  }, [project, selectedElementId, selectedPageId]);
 
   const updateSelectedPage = useCallback(
     (updater: (page: PortfolioPage) => PortfolioPage) => {
@@ -886,7 +994,12 @@ export function PortfolioBuilder() {
     (event: ReactPointerEvent<HTMLElement>, element: PortfolioElement) => {
       if (!selectedPage || element.locked) return;
 
-      interactionSnapshotRef.current = cloneProject(project);
+      interactionSnapshotRef.current = createHistoryEntry(
+        project,
+        selectedPageId,
+        element.id,
+      );
+      interactionChangedRef.current = false;
       setDragState({
         kind: 'move',
         pageId: selectedPage.id,
@@ -896,7 +1009,7 @@ export function PortfolioBuilder() {
         element,
       });
     },
-    [project, selectedPage],
+    [project, selectedPage, selectedPageId],
   );
 
   const beginElementResize = useCallback(
@@ -907,7 +1020,12 @@ export function PortfolioBuilder() {
     ) => {
       if (!selectedPage || element.locked) return;
 
-      interactionSnapshotRef.current = cloneProject(project);
+      interactionSnapshotRef.current = createHistoryEntry(
+        project,
+        selectedPageId,
+        element.id,
+      );
+      interactionChangedRef.current = false;
       setDragState({
         kind: 'resize',
         pageId: selectedPage.id,
@@ -918,7 +1036,7 @@ export function PortfolioBuilder() {
         handle,
       });
     },
-    [project, selectedPage],
+    [project, selectedPage, selectedPageId],
   );
 
   useEffect(() => {
@@ -930,10 +1048,11 @@ export function PortfolioBuilder() {
 
       setPast((history) => [
         ...history.slice(-(HISTORY_LIMIT - 1)),
-        interactionSnapshotRef.current as PortfolioProject,
+        interactionSnapshotRef.current as HistoryEntry,
       ]);
       setFuture([]);
       interactionSnapshotRef.current = null;
+      interactionChangedRef.current = true;
     }
 
     function handlePointerMove(event: PointerEvent) {
@@ -1012,7 +1131,10 @@ export function PortfolioBuilder() {
     function handlePointerUp() {
       interactionSnapshotRef.current = null;
       setDragState(null);
-      setProject((current) => stampProject(current));
+      if (interactionChangedRef.current) {
+        setProject((current) => stampProject(current));
+      }
+      interactionChangedRef.current = false;
     }
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -1029,6 +1151,7 @@ export function PortfolioBuilder() {
       const isModifier = event.ctrlKey || event.metaKey;
 
       if (mode !== 'edit') return;
+      if (isTextEntry(event.target)) return;
 
       if (isModifier && event.key.toLowerCase() === 'z') {
         event.preventDefault();
@@ -1043,7 +1166,24 @@ export function PortfolioBuilder() {
         return;
       }
 
-      if (isTextEntry(event.target)) return;
+      if (isModifier && (event.key === '+' || event.key === '=')) {
+        event.preventDefault();
+        stepZoom(ZOOM_STEP);
+        return;
+      }
+
+      if (isModifier && event.key === '-') {
+        event.preventDefault();
+        stepZoom(-ZOOM_STEP);
+        return;
+      }
+
+      if (isModifier && event.key === '0') {
+        event.preventDefault();
+        fitCanvasToWorkspace();
+        return;
+      }
+
       if (!selectedElement) return;
 
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -1127,10 +1267,12 @@ export function PortfolioBuilder() {
     commitProject,
     deleteSelectedElement,
     duplicateSelectedElement,
+    fitCanvasToWorkspace,
     mode,
     redo,
     selectedElement,
     selectedPage,
+    stepZoom,
     undo,
     updateSelectedElement,
   ]);
@@ -2055,7 +2197,7 @@ export function PortfolioBuilder() {
               Template
             </Button>
           </div>
-          <div className="page-thumbnail-list">
+          <div ref={pageThumbnailListRef} className="page-thumbnail-list">
             {project.pages.map((page, index) => (
               <div
                 key={page.id}
@@ -2074,6 +2216,9 @@ export function PortfolioBuilder() {
                 <button
                   type="button"
                   className="page-thumbnail-select"
+                  data-selected={
+                    selectedPage?.id === page.id ? 'true' : undefined
+                  }
                   onClick={() => selectPage(page.id)}
                 >
                   <div className="page-thumbnail-preview">
@@ -2201,51 +2346,100 @@ export function PortfolioBuilder() {
                 />
                 Safe
               </label>
-              <Field label="Zoom" compact>
+              <div className="zoom-control" aria-label="Canvas zoom controls">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Zoom out"
+                  disabled={zoom <= MIN_ZOOM}
+                  onClick={() => stepZoom(-ZOOM_STEP)}
+                >
+                  <Minus aria-hidden="true" />
+                </Button>
+                <output className="zoom-value" aria-label="Zoom percentage">
+                  {Math.round(zoom * 100)}%
+                </output>
                 <input
+                  aria-label="Canvas zoom"
                   type="range"
-                  min={0.38}
-                  max={1.15}
+                  min={MIN_ZOOM}
+                  max={MAX_ZOOM}
                   step={0.01}
                   value={zoom}
-                  onChange={(event) => setZoom(Number(event.target.value))}
+                  onChange={(event) =>
+                    setManualZoom(Number(event.target.value))
+                  }
                 />
-              </Field>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label="Set zoom to 100%"
+                  onClick={() => setManualZoom(1)}
+                >
+                  100%
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-pressed={zoomMode === 'fit'}
+                  onClick={fitCanvasToWorkspace}
+                >
+                  <Maximize2 aria-hidden="true" />
+                  Fit
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon-sm"
+                  aria-label="Zoom in"
+                  disabled={zoom >= MAX_ZOOM}
+                  onClick={() => stepZoom(ZOOM_STEP)}
+                >
+                  <Plus aria-hidden="true" />
+                </Button>
+              </div>
             </div>
           </div>
 
-          <div className="editor-canvas-scroll">
+          <div ref={canvasScrollRef} className="editor-canvas-scroll">
             {selectedPage ? (
-              <div
-                className="editor-canvas-shell"
-                style={{
-                  width: BOOK_PAGE_WIDTH * zoom,
-                  height: BOOK_PAGE_HEIGHT * zoom,
-                }}
-              >
+              <div className="editor-canvas-centering">
                 <div
-                  className="editor-canvas-scale"
+                  className="editor-canvas-shell"
                   style={{
-                    transform: `scale(${zoom})`,
-                    width: BOOK_PAGE_WIDTH,
-                    height: BOOK_PAGE_HEIGHT,
+                    width: BOOK_PAGE_WIDTH * zoom,
+                    height: BOOK_PAGE_HEIGHT * zoom,
                   }}
                 >
-                  <PortfolioBookPage
-                    page={selectedPage}
-                    pageIndex={Math.max(0, selectedPageIndex)}
-                    pageTotal={project.pages.length}
-                    assets={project.assets}
-                    mode="editor"
-                    selectedElementId={selectedElementId}
-                    showGrid={showGrid}
-                    showSafeArea={showSafeArea}
-                    onSelectElement={(elementId) =>
-                      setSelectedElementId(elementId.length ? elementId : null)
-                    }
-                    onElementPointerDown={beginElementMove}
-                    onResizePointerDown={beginElementResize}
-                  />
+                  <div
+                    className="editor-canvas-scale"
+                    style={{
+                      transform: `scale(${zoom})`,
+                      width: BOOK_PAGE_WIDTH,
+                      height: BOOK_PAGE_HEIGHT,
+                    }}
+                  >
+                    <PortfolioBookPage
+                      page={selectedPage}
+                      pageIndex={Math.max(0, selectedPageIndex)}
+                      pageTotal={project.pages.length}
+                      assets={project.assets}
+                      mode="editor"
+                      selectedElementId={selectedElementId}
+                      showGrid={showGrid}
+                      showSafeArea={showSafeArea}
+                      onSelectElement={(elementId) =>
+                        setSelectedElementId(
+                          elementId.length ? elementId : null,
+                        )
+                      }
+                      onElementPointerDown={beginElementMove}
+                      onResizePointerDown={beginElementResize}
+                    />
+                  </div>
                 </div>
               </div>
             ) : null}
@@ -2257,35 +2451,37 @@ export function PortfolioBuilder() {
             <span>Properties</span>
             <b>{selectedElement ? 'Element' : 'Page'}</b>
           </div>
-          {pageActions}
-          {renderElementProperties()}
-          <section className="property-section">
-            <div className="property-section-heading">
-              <span>Assets</span>
-              <b>{project.assets.length}</b>
-            </div>
-            <div className="asset-library">
-              {project.assets.length === 0 ? (
-                <p>No uploaded images yet.</p>
-              ) : (
-                project.assets.map((asset) => (
-                  <button
-                    type="button"
-                    key={asset.id}
-                    onClick={() => attachAssetToImage(asset)}
-                    aria-label={`Use ${asset.name}`}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className="asset-library-preview"
-                      style={{ backgroundImage: `url("${asset.dataUrl}")` }}
-                    />
-                    <span>{asset.name}</span>
-                  </button>
-                ))
-              )}
-            </div>
-          </section>
+          <div className="properties-panel-scroll">
+            {pageActions}
+            {renderElementProperties()}
+            <section className="property-section">
+              <div className="property-section-heading">
+                <span>Assets</span>
+                <b>{project.assets.length}</b>
+              </div>
+              <div className="asset-library">
+                {project.assets.length === 0 ? (
+                  <p>No uploaded images yet.</p>
+                ) : (
+                  project.assets.map((asset) => (
+                    <button
+                      type="button"
+                      key={asset.id}
+                      onClick={() => attachAssetToImage(asset)}
+                      aria-label={`Use ${asset.name}`}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="asset-library-preview"
+                        style={{ backgroundImage: `url("${asset.dataUrl}")` }}
+                      />
+                      <span>{asset.name}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </section>
+          </div>
         </aside>
       </div>
     </div>
