@@ -51,6 +51,8 @@ type PortfolioElementBase = {
   y: number;
   width: number;
   height: number;
+  rotation?: number;
+  opacity?: number;
   zIndex: number;
   locked: boolean;
   hidden: boolean;
@@ -1258,6 +1260,8 @@ function normalizeElement(
     y: numberValue(value.y, 60, -BOOK_PAGE_HEIGHT, BOOK_PAGE_HEIGHT * 2),
     width: numberValue(value.width, 180, 4, BOOK_PAGE_WIDTH * 2),
     height: numberValue(value.height, 80, 4, BOOK_PAGE_HEIGHT * 2),
+    rotation: numberValue(value.rotation, 0, -360, 360),
+    opacity: numberValue(value.opacity, 1, 0, 1),
     zIndex: numberValue(value.zIndex, fallbackIndex + 1, 0, 999),
     locked: booleanValue(value.locked, false),
     hidden: booleanValue(value.hidden, false),

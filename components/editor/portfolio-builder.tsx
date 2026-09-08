@@ -19,6 +19,8 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileCode2,
+  FileDown,
   Image as ImageIcon,
   Lock,
   Maximize2,
@@ -78,6 +80,7 @@ import { cn } from '@/lib/utils';
 
 type EditorMode = 'edit' | 'preview';
 type SaveStatus = 'Loading' | 'Saving' | 'Saved' | 'Error';
+type PageExportStatus = 'idle' | 'pdf' | 'svg';
 type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se' | 'e' | 's';
 type AddElementKind =
   | 'heading'
@@ -415,6 +418,8 @@ export function PortfolioBuilder() {
     null,
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('Loading');
+  const [pageExportStatus, setPageExportStatus] =
+    useState<PageExportStatus>('idle');
   const [hydrated, setHydrated] = useState(false);
   const [past, setPast] = useState<HistoryEntry[]>([]);
   const [future, setFuture] = useState<HistoryEntry[]>([]);
@@ -989,6 +994,42 @@ export function PortfolioBuilder() {
     },
     [commitProject],
   );
+
+  const downloadSelectedPageAsPdf = useCallback(() => {
+    if (!selectedPage) return;
+
+    setPageExportStatus('pdf');
+    void import('@/lib/portfolio-pdf-export')
+      .then(({ downloadPortfolioPagePdf }) =>
+        downloadPortfolioPagePdf(
+          project,
+          selectedPage,
+          Math.max(0, selectedPageIndex),
+        ),
+      )
+      .catch(() => {
+        window.alert('This page could not be exported as a PDF.');
+      })
+      .finally(() => setPageExportStatus('idle'));
+  }, [project, selectedPage, selectedPageIndex]);
+
+  const downloadSelectedPageAsSvg = useCallback(() => {
+    if (!selectedPage) return;
+
+    setPageExportStatus('svg');
+    void import('@/lib/portfolio-pdf-export')
+      .then(({ downloadPortfolioPageSvg }) =>
+        downloadPortfolioPageSvg(
+          project,
+          selectedPage,
+          Math.max(0, selectedPageIndex),
+        ),
+      )
+      .catch(() => {
+        window.alert('This page could not be exported as an SVG.');
+      })
+      .finally(() => setPageExportStatus('idle'));
+  }, [project, selectedPage, selectedPageIndex]);
 
   const beginElementMove = useCallback(
     (event: ReactPointerEvent<HTMLElement>, element: PortfolioElement) => {
@@ -1597,8 +1638,6 @@ export function PortfolioBuilder() {
                 options={[
                   { label: 'Studio sans', value: project.theme.fontSans },
                   { label: 'Studio mono', value: project.theme.fontMono },
-                  { label: 'Arial', value: 'Arial, Helvetica, sans-serif' },
-                  { label: 'Georgia', value: 'Georgia, serif' },
                 ]}
               />
             </Field>
@@ -2151,6 +2190,26 @@ export function PortfolioBuilder() {
           >
             <Upload aria-hidden="true" />
             Import
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!selectedPage || pageExportStatus !== 'idle'}
+            onClick={downloadSelectedPageAsPdf}
+          >
+            <FileDown aria-hidden="true" />
+            {pageExportStatus === 'pdf' ? 'Preparing PDF' : 'Download PDF'}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!selectedPage || pageExportStatus !== 'idle'}
+            onClick={downloadSelectedPageAsSvg}
+          >
+            <FileCode2 aria-hidden="true" />
+            {pageExportStatus === 'svg' ? 'Preparing SVG' : 'Export SVG'}
           </Button>
           <Button type="button" size="sm" onClick={() => setMode('preview')}>
             <Eye aria-hidden="true" />

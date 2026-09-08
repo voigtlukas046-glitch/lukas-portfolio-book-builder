@@ -116,6 +116,12 @@ function ElementLayer({
     top: heightPercent(element.y),
     width: widthPercent(element.width),
     height: heightPercent(element.height),
+    opacity: element.opacity,
+    transform:
+      element.rotation && Number.isFinite(element.rotation)
+        ? `rotate(${element.rotation}deg)`
+        : undefined,
+    transformOrigin: 'center',
     zIndex: element.zIndex,
   };
 
