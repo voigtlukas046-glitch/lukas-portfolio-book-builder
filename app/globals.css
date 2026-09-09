@@ -2,6 +2,22 @@
 @import 'tw-animate-css';
 @import 'shadcn/tailwind.css';
 
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/geist/Geist-Variable.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/geist/GeistMono-Variable.ttf') format('truetype');
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -49,6 +65,8 @@
 }
 
 :root {
+  --font-geist-sans: 'Geist';
+  --font-geist-mono: 'Geist Mono';
   --ink: #080808;
   --muted-ink: #363634;
   --soft-ink: #5d5e5a;
