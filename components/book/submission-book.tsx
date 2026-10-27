@@ -97,6 +97,7 @@ export function SubmissionBook() {
           size: 'fixed',
           startPage: currentRef.current,
           showCover: true,
+          showPageCorners: false,
           usePortrait: true,
           autoSize: true,
           flippingTime: window.matchMedia('(prefers-reduced-motion: reduce)')
